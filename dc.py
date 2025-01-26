@@ -281,7 +281,7 @@ async def random_join(interaction: discord.Interaction, game_id: str):
     participant_list = '\n'.join([f"<@{p['id']}> 分數: {p['score']} 穩定性: {p['stability']}" for p in participants]) or "目前無人參加"
     embed = Embed(title=f"房間 {game_id} 參加者名單", description=participant_list, color=0x00ff00)
     await interaction.response.send_message(embed=embed)
-@bot.tree.command(name="排行榜", description="查看所有玩家的积分排行榜")
+@bot.tree.command(name="排行榜", description="查看所有玩家的積分排行榜")
 async def leaderboard(interaction: discord.Interaction):
     if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id != 584371520395149312:
         await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
@@ -586,98 +586,126 @@ def record_team_match(player_id, teammate_id, result):
         
         save_players()
 
+def update_player_data(player):
+    for p in players:
+        if p['id'] == player['id']:
+            p['score'] = player['score']
+            p['stability'] = player['stability']
+            p['total_games'] = player['total_games']
+            p['wins'] = player['wins']
+            p['losses'] = player['losses']
+            break
+# 定义文件路径
+SERVER_INFO_FILE = 'server_info.txt'
+
+# 初始化总进行场数
+def initialize_total_matches():
+    if os.path.exists(SERVER_INFO_FILE):
+        with open(SERVER_INFO_FILE, 'r') as file:
+            line = file.readline()
+            if line.startswith("Total Matches Played:"):
+                return int(line.split(":")[1].strip())
+    return 0
+
+
+# 保存总进行场数到文件
+def save_total_matches(total_matches):
+    with open(SERVER_INFO_FILE, 'w') as file:
+        file.write(f"Total Matches Played: {total_matches}\n")
+
+# 初始化总进行场数
+total_matches_played = initialize_total_matches()
+
+def calculate_stability_change(opponent_win_rate, player_total_games, total_matches_played, total_players):
+    # 调整基础稳定度变化范围
+    base_stability_change = 5 if opponent_win_rate > 0.6 else -5
+    
+    # 根据总场数、玩家总场数和玩家总数缩放变化量
+    # 增加玩家总数对缩放因子的影响，使得玩家总数增加时，缩放因子更接近1
+    # 同时考虑个人场数的影响，使得个人场数增加时，缩放因子减小
+    player_influence = player_total_games / total_matches_played
+    scaling_factor = 1 / (1 + player_influence * 3 + (total_players / 200))
+    
+    # 确保缩放因子在合理范围内
+    scaling_factor = max(0.1, min(1, scaling_factor))
+    
+    # 计算最终的稳定度变化
+    stability_change = base_stability_change * scaling_factor
+    
+    return stability_change
+
+
+
 def adjust_scores(winning_team, losing_team):
-    # 计算所有玩家的平均分数
+    global total_matches_played
+    total_matches_played += 1  # 每次调用此函数时，增加总进行场数
+
     all_players = winning_team + losing_team
     average_score = sum(player['score'] for player in all_players) / len(all_players)
 
     base_score_increase = 17
     base_score_decrease = 16
 
-    # 用於存儲分數變動
     score_changes = {}
 
     for player in winning_team:
-        # 根据与平均分的差距调整增益
         score_difference = player['score'] - average_score
-        # 分數越高，增益越少
         score_increase = base_score_increase * (1 - score_difference / average_score)
-        
-        # 考慮總場數對穩定度影響的調整
         score_increase *= (1 + (10 - player['stability']) / 20)
 
         score_change = max(1, min(30, score_increase))
         player['score'] += score_change
-        player['score'] = round(player['score'], 2)  # 保留小数点后两位
+        player['score'] = round(player['score'], 2)
 
-        # 根據總場數調整穩定度變化
-        stability_change = 5 / (1 + player['total_games'] / 10)
-        player['stability'] = min(10, player['stability'] + stability_change)
+        # 计算对手的平均胜率
+        opponent_win_rate = sum(p['wins'] / p['total_games'] for p in losing_team if p['total_games'] > 0) / len(losing_team)
+        
+        # 根据对手的胜率和总场数调整稳定度
+        stability_change = calculate_stability_change(opponent_win_rate, player['total_games'], total_matches_played)
+        player['stability'] = max(0, min(10, player['stability'] + stability_change))
 
-        # 增加玩家的總場數
         player['total_games'] += 1
         player['wins'] += 1
-        # 记录与队友的合作胜率
+
         for teammate in winning_team:
             if teammate['id'] != player['id']:
                 record_team_match(player['id'], teammate['id'], 'win')
 
-        # 同步更新 players 数组
-        for p in players:
-            if p['id'] == player['id']:
-                p['score'] = player['score']
-                p['stability'] = player['stability']
-                p['total_games'] = player['total_games']
-                p['wins'] = player['wins']
-                p['losses'] = player['losses']
-                break
+        update_player_data(player)
 
-        # 記錄分數變動，保留小數點
         score_changes[player['id']] = f"+{score_change:.2f}"
 
     for player in losing_team:
-        # 根据与平均分的差距调整减少
         score_difference = player['score'] - average_score
         score_decrease = base_score_decrease * (1 + score_difference / average_score)
-
-        # 考慮總場數對穩定度影響的調整
         score_decrease *= (1 + (10 - player['stability']) / 20)
 
         score_change = max(1, min(30, score_decrease))
         player['score'] -= score_change
-        player['score'] = round(player['score'], 2)  # 保留小数点后两位
+        player['score'] = round(player['score'], 2)
 
-        # 根據總場數調整穩定度變化
-        stability_change = 5 / (1 + player['total_games'] / 10)
-        player['stability'] = max(0, player['stability'] - stability_change)
+        # 计算对手的平均胜率
+        opponent_win_rate = sum(p['wins'] / p['total_games'] for p in winning_team if p['total_games'] > 0) / len(winning_team)
+        
+        # 根据对手的胜率和总场数调整稳定度
+        stability_change = calculate_stability_change(opponent_win_rate, player['total_games'], total_matches_played)
+        player['stability'] = max(0, min(10, player['stability'] + stability_change))
 
-        # 增加玩家的總場數
         player['total_games'] += 1
         player['losses'] += 1
-        # 记录与队友的合作胜率
+
         for teammate in losing_team:
             if teammate['id'] != player['id']:
-                record_team_match(player['id'], teammate['id'], 'losses')
+                record_team_match(player['id'], teammate['id'], 'loss')
 
-        # 同步更新 players 数组
-        for p in players:
-            if p['id'] == player['id']:
-                p['score'] = player['score']
-                p['stability'] = player['stability']
-                p['total_games'] = player['total_games']
-                p['wins'] = player['wins']
-                p['losses'] = player['losses']
-                break
+        update_player_data(player)
 
-        # 記錄分數變動，保留小數點
         score_changes[player['id']] = f"-{score_change:.2f}"
 
     save_players()
+    save_total_matches(total_matches_played)  # 保存总进行场数
 
-    # 返回分數變動
     return score_changes
-
-
 	
 # 添加地圖到總地圖池
 @bot.tree.command(name="總地圖-新增", description="添加地圖到總地圖池")
@@ -890,6 +918,9 @@ async def help_command(interaction: discord.Interaction):
         "/抽 <項目列表> - 從提供的列表中隨機抽取一個項目\n"
         "/計算機 <表達式> - 計算四則運算表達式\n"
         "/創建比賽 - 創建一場新的比賽\n"
+        "/查詢分數 - 查詢玩家的分數和穩定性\n"
+        "/查詢合作勝率 - 查詢玩家與特定隊友的合作勝率\n"
+        "/排行榜 - 查看所有玩家的积分排行榜\n"
     )
     await interaction.response.send_message(help_text)
 
