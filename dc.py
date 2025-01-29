@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from discord import ButtonStyle, Embed, Interaction
-from discord.ui import Button, View, Select
+from discord.ui import Button, View, Select,button
 import random
 import json
 import os
@@ -45,12 +45,13 @@ temp_map_pools = {}
 # 管理多場比賽的字典
 games = {}
 
-# 讀取玩家數據
+# 玩家列表
+
 def load_players():
     if os.path.exists(PLAYERS_FILE):
         with open(PLAYERS_FILE, 'r') as file:
-            return json.load(file)
-    return []
+            players = json.load(file)
+    return players
 
 # 寫入玩家數據
 def save_players():
@@ -61,13 +62,12 @@ def save_players():
     except Exception as e:
         print(f"保存玩家数据时发生错误: {e}")
 		
-# 玩家列表
-players = load_players()
 
 # 註冊玩家
-def register_player(user_id, score, stability):
+def register_player(user_id, score, stability,userName):
     players.append({
         'id': user_id,
+        'userName':userName,
         'score': score,
         'stability': stability,
         'total_games': 0,
@@ -76,8 +76,7 @@ def register_player(user_id, score, stability):
         'team_stats': {}  # 新增的合作數據欄位
     })
     save_players()
-
-
+players = load_players()
 
 def balance_teams(participants):
     # 定義特定玩家ID
@@ -182,19 +181,57 @@ async def on_message(message):
 		
 @bot.tree.command(name="註冊", description="註冊玩家並設置初始分數和穩定度")
 @app_commands.describe(user="要註冊的用戶", score="玩家分數", stability="玩家穩定度")
-async def register(interaction: discord.Interaction, user: discord.User, score: int, stability: float):
-    if interaction.user.id != 584371520395149312:
+async def register(interaction: discord.Interaction, user: discord.User = None, score: int = 1000, stability: float = 10.0):
+    # 如果沒有指定用戶，則默認為註冊自己
+    if user is None:
+        user = interaction.user
+        # 一般用戶自行註冊時，強制使用預設的分數和穩定度
+        score = 1000
+        stability = 10.0
+
+    # 如果指定了用戶且不是自己，檢查是否有管理員權限
+    if user != interaction.user and interaction.user.id != 584371520395149312:
         await interaction.response.send_message("你沒有權限註冊其他用戶。", ephemeral=True)
         return
 
-    # 检查玩家是否已经注册
+    # 檢查玩家是否已經註冊
     if any(p['id'] == user.id for p in players):
         await interaction.response.send_message(f"{user.name} 已經註冊。", ephemeral=True)
         return
+     # 獲取用戶在伺服器中的暱稱
+    guild = interaction.guild
+    member = guild.get_member(user.id)
+    nickname = member.display_name if member else user.name
+    # 註冊玩家
+    register_player(user.id, score, stability,nickname)
+    await interaction.response.send_message(f'{nickname} 已註冊，分數: {score}, 穩定度: {stability}', ephemeral=True)
 
-    # 注册玩家
-    register_player(user.id, score, stability)
-    await interaction.response.send_message(f'{user.name} 已註冊，分數: {score}, 穩定度: {stability}')
+@bot.tree.command(name="批量註冊", description="註冊伺服器中所有具有特定身分組的用戶")
+@app_commands.describe(score="玩家分數", stability="玩家穩定度")
+async def bulk_register(interaction: discord.Interaction, score: int, stability: float):
+    # 定義需要的身分組名稱
+    required_role_name = "世紀帝國玩家"
+    registered_users = []
+
+    # 遍歷伺服器中的所有成員
+    for member in interaction.guild.members:
+        # 檢查成員是否擁有特定身分組
+        if any(role.name == required_role_name for role in member.roles):
+            # 檢查玩家是否已經註冊
+            if not any(p['id'] == member.id for p in players):
+                # 註冊玩家
+                register_player(member.id, score, stability,member.display_name)
+                # 使用暱稱或用戶名
+                registered_users.append(member.display_name)
+
+    # 回應註冊結果
+    if registered_users:
+        await interaction.response.send_message(f"以下用戶已註冊：{', '.join(registered_users)}，分數: {score}, 穩定度: {stability}", ephemeral=True)
+    else:
+        await interaction.response.send_message("沒有新的用戶被註冊，可能所有符合條件的用戶已經註冊過。", ephemeral=True)
+
+
+
 
 @bot.tree.command(name="重整用戶", description="刪除重複用戶並重新設定所有人的穩定度")
 @app_commands.describe(stability="新的穩定度（可選）")
@@ -250,7 +287,16 @@ async def assign_to_game(interaction: discord.Interaction, room_id: int, user_me
             continue
 
         # 將使用者加入房間
-        games[str(room_id)]['participants'].append({'id': user.id, 'score': player_info['score'], 'stability': player_info['stability']})
+        games[str(room_id)]['participants'].append({
+            'id': player_info['id'],
+            'userName': player_info['userName'],
+            'score': player_info['score'],
+            'stability': player_info['stability'],
+            'total_games': player_info['total_games'],
+            'wins': player_info['wins'],
+            'losses': player_info['losses'],
+            'team_stats': player_info['team_stats']
+        })
         response_messages.append(f"<@{user.id}> 已被指定加入房間 {room_id}。")
 
     # 發送回應訊息
@@ -274,30 +320,73 @@ async def random_join(interaction: discord.Interaction, game_id: str):
     random.shuffle(available_players)
     for player in available_players[:8]:
         if len(games[game_id]['participants']) < 8:
-            games[game_id]['participants'].append({'id': player['id'], 'score': player['score'], 'stability': player['stability']})
+            games[game_id]['participants'].append({
+                'id': player['id'],
+                'userName': player['userName'],
+                'score': player['score'],
+                'stability': player['stability'],
+                'total_games': player['total_games'],
+                'wins': player['wins'],
+                'losses': player['losses'],
+                'team_stats': player['team_stats']
+            })
 
     # 更新參加者列表
     participants = games[game_id]['participants']
     participant_list = '\n'.join([f"<@{p['id']}> 分數: {p['score']} 穩定性: {p['stability']}" for p in participants]) or "目前無人參加"
     embed = Embed(title=f"房間 {game_id} 參加者名單", description=participant_list, color=0x00ff00)
     await interaction.response.send_message(embed=embed)
+
+# 定義每頁顯示的玩家數量
+PLAYERS_PER_PAGE = 10
+
 @bot.tree.command(name="排行榜", description="查看所有玩家的積分排行榜")
 async def leaderboard(interaction: discord.Interaction):
     if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id != 584371520395149312:
         await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
         return
-    # 按分数降序排列玩家
-    sorted_players = sorted(players, key=lambda x: x['score'], reverse=True)
-    
-    # 构建排行榜信息
-    leaderboard_info = '\n'.join([
-        f"{i+1}. <@{p['id']}> - 分數: {p['score']}, 稳定性: {p['stability']}, 勝率: {p['wins'] / (p['total_games'] if p['total_games'] > 0 else 1):.2%}" for i, p in enumerate(sorted_players) if p['total_games'] >= 0])
-    
-    # 创建嵌入消息
-    embed = Embed(title="積分排行榜", description=leaderboard_info, color=0x00ff00)
-    await interaction.response.send_message(embed=embed)
 
-    
+    # 按分數降序排列玩家
+    sorted_players = sorted(players, key=lambda x: x['score'], reverse=True)
+    # 創建嵌入消息
+    def create_embed(page: int):
+        start = page * PLAYERS_PER_PAGE
+        end = start + PLAYERS_PER_PAGE
+        leaderboard_info = '\n'.join([
+            f"{page*10+i+1}. {interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']}, 穩定性: {p['stability']}, 勝率: {p['wins'] / (p['total_games'] if p['total_games'] > 0 else 1):.2%}\n"for i, p in enumerate(sorted_players[start:end]) if p['total_games'] >= 0
+        ])
+        embed = Embed(title=f"積分排行榜 - 第 {page + 1} 頁", description=leaderboard_info, color=0x00ff00)
+        return embed
+        
+    # 創建按鈕視圖
+    class LeaderboardView(View):
+        def __init__(self, total_pages: int):
+            super().__init__()
+            self.current_page = 0
+            self.total_pages = total_pages
+
+        @button(label="上一頁", style=ButtonStyle.primary, disabled=True)
+        async def previous_page(self, interaction: Interaction, button):
+            self.current_page -= 1
+            if self.current_page == 0:
+                button.disabled = True
+            self.children[1].disabled = False  # Enable next button
+            await interaction.response.edit_message(embed=create_embed(self.current_page), view=self)
+
+        @button(label="下一頁", style=ButtonStyle.primary)
+        async def next_page(self, interaction: Interaction, button):
+            self.current_page += 1
+            if self.current_page == self.total_pages - 1:
+                button.disabled = True
+            self.children[0].disabled = False  # Enable previous button
+            await interaction.response.edit_message(embed=create_embed(self.current_page), view=self)
+
+    total_pages = (len(sorted_players) - 1) // PLAYERS_PER_PAGE + 1
+    view = LeaderboardView(total_pages)
+    await interaction.response.send_message(embed=create_embed(0), view=view)
+
+
+
 @bot.tree.command(name="查詢分數", description="查詢玩家的分數和穩定性")
 async def query_score(interaction: discord.Interaction, user: discord.User):
     if interaction.channel.id != ALLOWED_CHANNEL_ID:
@@ -349,8 +438,6 @@ async def adjust_all_scores(interaction: discord.Interaction, score_change: int)
     await interaction.response.send_message(f"所有玩家的分数已调整，变动: {score_change}")
     
 
-
-        
 @bot.tree.command(name="調整分數", description="調整指定玩家的分數")
 @app_commands.describe(user="要調整分數的用戶", score_change="分數變化（可以是正數或負數）")
 async def adjust_score(interaction: discord.Interaction, user: discord.User, score_change: int):
@@ -362,13 +449,17 @@ async def adjust_score(interaction: discord.Interaction, user: discord.User, sco
     # 查找指定用戶
     player = next((p for p in players if p['id'] == user.id), None)
     if player:
+        # 獲取用戶在伺服器中的暱稱
+        guild = interaction.guild
+        member = guild.get_member(user.id)
+        nickname = member.display_name if member else user.name
+
         # 調整分數
         player['score'] += score_change
         save_players()
-        await interaction.response.send_message(f"{user.name} 的分數已調整，新的分數為: {player['score']}")
+        await interaction.response.send_message(f"{nickname} 的分數已調整，新的分數為: {player['score']}")
     else:
         await interaction.response.send_message("找不到該用戶，請確認用戶已註冊。")
-
 
 @bot.tree.command(name="創建比賽", description="創建一場新的比賽")
 async def create_game(interaction: Interaction):
@@ -382,7 +473,7 @@ async def create_game(interaction: Interaction):
         'started': False,
         'result_decided': False  # 用於記錄比賽結果是否已經決定
     }
-    result_view = View()
+    result_view = View(timeout=3600*3)
     async def update_participant_list():
         participants = games[game_id]['participants']
         participant_list = '\n'.join([f"<@{p['id']}> 分數: {p['score']} 穩定性: {p['stability']}" for p in participants]) or "目前無人參加"
@@ -406,9 +497,14 @@ async def create_game(interaction: Interaction):
             return
 
         games[game_id]['participants'].append({
-            'id': user_id,
+            'id': player_info['id'],
+            'userName': player_info['userName'],
             'score': player_info['score'],
-            'stability': player_info['stability']
+            'stability': player_info['stability'],
+            'total_games': player_info['total_games'],
+            'wins': player_info['wins'],
+            'losses': player_info['losses'],
+            'team_stats': player_info['team_stats']
         })
         await update_participant_list()
         await interaction.response.send_message("加入了這場比賽。", ephemeral=True)
@@ -468,14 +564,14 @@ async def create_game(interaction: Interaction):
             team2 = games[game_id]['team2']
     
             # 假設 adjust_scores 函數返回分數變動
-            score_changes = adjust_scores(team1, team2)
+            changedValue = adjust_scores(team1, team2)
     
             # 更新後的分數和變動顯示
             team1_info = '\n'.join(
-                [f"<@{p['id']}> 分數: {p['score']} ({score_changes[p['id']]}), 穩定度: {p['stability']}" for p in team1]
+                [f"<@{p['id']}> 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team1]
             )
             team2_info = '\n'.join(
-                [f"<@{p['id']}> 分數: {p['score']} ({score_changes[p['id']]}), 穩定度: {p['stability']}" for p in team2]
+                [f"<@{p['id']}> 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
             )
     
             embed = Embed(
@@ -504,14 +600,14 @@ async def create_game(interaction: Interaction):
             team2 = games[game_id]['team2']
     
             # 假設 adjust_scores 函數返回分數變動
-            score_changes = adjust_scores(team2, team1)
+            changedValue = adjust_scores(team2, team1)
     
             # 更新後的分數和變動顯示
             team1_info = '\n'.join(
-                [f"<@{p['id']}> 分數: {p['score']} ({score_changes[p['id']]}), 穩定度: {p['stability']}" for p in team1]
+                [f"<@{p['id']}> 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team1]
             )
             team2_info = '\n'.join(
-                [f"<@{p['id']}> 分數: {p['score']} ({score_changes[p['id']]}), 穩定度: {p['stability']}" for p in team2]
+                [f"<@{p['id']}> 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
             )
     
             embed = Embed(
@@ -550,11 +646,9 @@ async def create_game(interaction: Interaction):
     await interaction.response.send_message(f'房間已創建，ID: {game_id}。點擊按鈕加入或取消參加比賽。', view=view)
     await update_participant_list()
 
-    
-    async def update_result_view_periodically(interaction, result_view):
-        while True:
+    async def update_result_view_periodically(interaction, result_view, game_id):
+        while not games[game_id]['result_decided']:
             await asyncio.sleep(600)  # 每10分鐘更新一次
-    
             try:
                 # 檢查消息是否存在
                 message = await interaction.original_response()
@@ -570,9 +664,10 @@ async def create_game(interaction: Interaction):
             except discord.errors.HTTPException as e:
                 print(f"HTTP 錯誤: {e}")
                 # 可以選擇在這裡重試或記錄錯誤
-                
-    # 假設這是在一個事件或命令中調用
-    asyncio.create_task(update_result_view_periodically(interaction, result_view))
+    
+    # 在創建比賽時啟動定期更新任務
+    asyncio.create_task(update_result_view_periodically(interaction, result_view, game_id))
+
     
 def record_team_match(player_id, teammate_id, result):
     player = next((p for p in players if p['id'] == player_id), None)
@@ -584,7 +679,6 @@ def record_team_match(player_id, teammate_id, result):
         if result == 'win':
             player['team_stats'][teammate_id]['wins'] += 1
         
-        save_players()
 
 def update_player_data(player):
     for p in players:
@@ -618,14 +712,13 @@ total_matches_played = initialize_total_matches()
 
 def calculate_stability_change(opponent_win_rate, player_total_games, total_matches_played, total_players):
     # 调整基础稳定度变化范围
-    base_stability_change = 5 if opponent_win_rate > 0.6 else -5
+    base_stability_change = 5 if opponent_win_rate > 0.7 else -5
     
     # 根据总场数、玩家总场数和玩家总数缩放变化量
     # 增加玩家总数对缩放因子的影响，使得玩家总数增加时，缩放因子更接近1
     # 同时考虑个人场数的影响，使得个人场数增加时，缩放因子减小
-    player_influence = player_total_games / total_matches_played
+    player_influence = player_total_games / max(1,total_matches_played)
     scaling_factor = 1 / (1 + player_influence * 3 + (total_players / 200))
-    
     # 确保缩放因子在合理范围内
     scaling_factor = max(0.1, min(1, scaling_factor))
     
@@ -643,27 +736,31 @@ def adjust_scores(winning_team, losing_team):
     all_players = winning_team + losing_team
     average_score = sum(player['score'] for player in all_players) / len(all_players)
 
-    base_score_increase = 17
-    base_score_decrease = 16
+    base_score_increase = 20
+    base_score_decrease = 19
 
     score_changes = {}
-
+    stability_changes = {}
     for player in winning_team:
         score_difference = player['score'] - average_score
         score_increase = base_score_increase * (1 - score_difference / average_score)
-        score_increase *= (1 + (10 - player['stability']) / 20)
+        score_increase *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(30, score_increase))
+        score_change = max(1, min(40, score_increase))
         player['score'] += score_change
         player['score'] = round(player['score'], 2)
 
-        # 计算对手的平均胜率
-        opponent_win_rate = sum(p['wins'] / p['total_games'] for p in losing_team if p['total_games'] > 0) / len(losing_team)
+        if len(losing_team) > 0:
+            opponent_win_rate = sum(
+                p.get('wins', 0) / max(1, p.get('total_games', 1)) for p in losing_team if p.get('total_games', 0) > 0
+            ) / len(losing_team)
+        else:
+            opponent_win_rate = 0  # 或者其他適當的預設值
         
         # 根据对手的胜率和总场数调整稳定度
-        stability_change = calculate_stability_change(opponent_win_rate, player['total_games'], total_matches_played)
+        stability_change = calculate_stability_change(opponent_win_rate, sum(max(1, p.get('total_games', 1)) for p in winning_team if p.get('total_games', 0) > 0), total_matches_played,len(all_players))
         player['stability'] = max(0, min(10, player['stability'] + stability_change))
-
+        player['stability'] = round(player['stability'], 2)  # 保留小數點兩位
         player['total_games'] += 1
         player['wins'] += 1
 
@@ -674,23 +771,27 @@ def adjust_scores(winning_team, losing_team):
         update_player_data(player)
 
         score_changes[player['id']] = f"+{score_change:.2f}"
+        stability_changes[player['id']] = f"{stability_change:.2f}"
 
     for player in losing_team:
         score_difference = player['score'] - average_score
         score_decrease = base_score_decrease * (1 + score_difference / average_score)
-        score_decrease *= (1 + (10 - player['stability']) / 20)
+        score_decrease *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(30, score_decrease))
+        score_change = max(1, min(40, score_decrease))
         player['score'] -= score_change
         player['score'] = round(player['score'], 2)
 
-        # 计算对手的平均胜率
-        opponent_win_rate = sum(p['wins'] / p['total_games'] for p in winning_team if p['total_games'] > 0) / len(winning_team)
-        
+        if len(winning_team) > 0:
+            opponent_win_rate = sum(
+                p.get('wins', 0) / max(1, p.get('total_games', 1)) for p in winning_team if p.get('total_games', 0) > 0
+            ) / len(winning_team)
+        else:
+            opponent_win_rate = 0  # 或者其他適當的預設值
         # 根据对手的胜率和总场数调整稳定度
-        stability_change = calculate_stability_change(opponent_win_rate, player['total_games'], total_matches_played)
+        stability_change = calculate_stability_change(opponent_win_rate, sum(max(1, p.get('total_games', 1)) for p in losing_team if p.get('total_games', 0) > 0), total_matches_played,len(all_players))
         player['stability'] = max(0, min(10, player['stability'] + stability_change))
-
+        player['stability'] = round(player['stability'], 2)  # 保留小數點兩位
         player['total_games'] += 1
         player['losses'] += 1
 
@@ -701,11 +802,12 @@ def adjust_scores(winning_team, losing_team):
         update_player_data(player)
 
         score_changes[player['id']] = f"-{score_change:.2f}"
+        stability_changes[player['id']] = f"{stability_change:.2f}"
 
     save_players()
     save_total_matches(total_matches_played)  # 保存总进行场数
 
-    return score_changes
+    return [score_changes,stability_changes]
 	
 # 添加地圖到總地圖池
 @bot.tree.command(name="總地圖-新增", description="添加地圖到總地圖池")
