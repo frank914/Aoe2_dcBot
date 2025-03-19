@@ -1,19 +1,59 @@
 # Write by GPT & Xiang
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from discord import ButtonStyle, Embed, Interaction
 from discord.ui import Button, View, Select,button,Modal,TextInput
-from datetime import datetime
+from datetime import datetime,timedelta
 import random
 import json
 import os
 import asyncio
 import shutil
+import math
 
 # 假设这是你的管理者名單
 ADMIN_USER_IDS = [584371520395149312] 
-    
+
+
+# 定義天氣效果
+WEATHER_EFFECTS = {
+    "晴天": 1.0,  # 分數增減幅度正常
+    "暴風雨": 1.5,  # 分數增減幅度增加
+    "微風": 0.8,  # 分數增減幅度減少
+    "雷電": 2.0,  # 分數增減幅度大幅增加
+    "霧霾": random.uniform(0.5, 1.5)  # 分數增減幅度隨機波動
+}
+
+# 定義道具
+ITEMS = {
+    "能量飲料(2金幣)-該場比賽分數浮動增加20%": {
+        "price": 2,  # 價格
+        "effect": "increase_score_multiplier",  # 效果：增加分數增減幅度
+        "value": 1.2  # 分數增減幅度增加 20%
+    },
+    "鎮定劑(2金幣)-該場比賽分數浮動減少20%": {
+        "price": 2,
+        "effect": "decrease_score_multiplier",  # 效果：減少分數增減幅度
+        "value": 0.8  # 分數增減幅度減少 20%
+    },
+    "搗蛋卡(5金幣)-該場比賽有機會反轉分數增減效果": {
+        "price": 5,
+        "effect": "reverse_score",  # 效果：有機會反轉分數增減效果
+        "value": -1  # 分數增減效果反轉
+    },
+    "雙倍卡(4金幣)-該場比賽分數增減雙倍": {
+        "price": 4,
+        "effect": "double_score",  # 效果：分數增減效果加倍
+        "value": 2  # 分數增減效果加倍
+    },
+    "保護罩(1金幣)-該場比賽分數不受天氣效果影響": {
+        "price": 1,
+        "effect": "ignore_weather",  # 效果：不受天氣效果影響
+        "value": 1  # 不受天氣效果影響
+    }
+}
+
 # 設定 Bot 物件
 intents = discord.Intents.default()
 intents.typing = False
@@ -71,7 +111,13 @@ temp_map_pools = {}
 # 管理多場比賽的字典
 games = {}
 
-
+# 檢查並讀取現有的角色購買記錄
+if os.path.exists('roles.json'):
+    with open('roles.json', 'r') as f:
+        role_data = json.load(f)
+else:
+    role_data = {}
+        
 def load_players():
     if os.path.exists(PLAYERS_FILE):
         with open(PLAYERS_FILE, 'r') as file:
@@ -91,22 +137,40 @@ def save_players():
 		
 
 # 註冊玩家
-def register_player(user_id, score, stability,userName):
+def register_player(user_id, score, stability, userName):
     players.append({
         'id': user_id,
-        'userName':userName,
+        'userName': userName,
         'score': score,
         'stability': stability,
         'total_games': 0,
         'wins': 0,
         'losses': 0,
-        'team_stats': {},  # 新增的合作數據欄位
-        'coins':0,
-        'last_check_in':0
+        'team_stats': {},
+        'coins': 0,
+        'last_check_in': 0,
+        'ratings': {},
+        'roles': {},  # 新增字段，用于存储购买的角色及其到期时间
+        'items': {}  # 新增字段，用于存储道具及其数量
     })
     save_players()
 players = load_players()
 
+def calculate_composite_score(player):
+    ratings = player.get('ratings', {})
+    num_ratings = len(ratings)
+
+    if num_ratings > 0:
+        total_rating = sum(ratings.values())
+        average_rating = total_rating / num_ratings
+        # 使用對數縮放
+        scaled_rating = average_rating * math.log(num_ratings + 1)
+    else:
+        scaled_rating = 0
+
+    composite_score = player['score'] + scaled_rating * 8
+    return float(f"{composite_score:.2f}")
+    
 def balance_teams(participants):
     # 定義特定玩家ID
     special_players = {}
@@ -132,20 +196,20 @@ def balance_teams(participants):
         team2 = []
         remaining_participants = participants
 
-    # 按照分數排序剩餘的參與者
-    remaining_participants.sort(key=lambda x: x['score'], reverse=True)
+    # 按照綜合評分排序剩餘的參與者
+    remaining_participants.sort(key=calculate_composite_score, reverse=True)
 
-    score1 = sum(p['score'] for p in team1)
-    score2 = sum(p['score'] for p in team2)
+    score1 = sum(calculate_composite_score(p) for p in team1)
+    score2 = sum(calculate_composite_score(p) for p in team2)
 
     # 分配剩餘的參與者
     for player in remaining_participants:
         if score1 <= score2:
             team1.append(player)
-            score1 += player['score']
+            score1 += (calculate_composite_score(player))
         else:
             team2.append(player)
-            score2 += player['score']
+            score2 += (calculate_composite_score(player))
 
     # 迭代優化
     for _ in range(20):  # 增加迭代次數
@@ -153,8 +217,8 @@ def balance_teams(participants):
             # 嘗試交換兩隊中分數最接近的玩家
             for p1 in team1:
                 for p2 in team2:
-                    new_score1 = score1 - p1['score'] + p2['score']
-                    new_score2 = score2 - p2['score'] + p1['score']
+                    new_score1 = score1 - calculate_composite_score(p1) + calculate_composite_score(p2)
+                    new_score2 = score2 - calculate_composite_score(p2) + calculate_composite_score(p1)
                     if abs(new_score1 - new_score2) < abs(score1 - score2):
                         team1.remove(p1)
                         team2.remove(p2)
@@ -165,6 +229,7 @@ def balance_teams(participants):
                         break
 
     return team1, team2
+
 
 def reset_users(new_stability=None):
     # 使用字典來去除重複用戶
@@ -183,7 +248,92 @@ def reset_users(new_stability=None):
     save_players()
     print("用戶數據已重整。")
 
-# 同步斜線指令
+
+@tasks.loop(minutes=180)  
+async def check_roles_expiry_task():
+    current_time = datetime.now()
+
+    for player in players:
+        if 'roles' not in player:
+            continue
+
+        guild = discord.utils.get(bot.guilds, id=959587766017097760)  # 替換為你的伺服器ID
+        member = guild.get_member(player['id'])
+
+        if not member:
+            continue
+
+        for role_id, expiry_time in list(player['roles'].items()):
+            expiry_time = datetime.fromisoformat(expiry_time)
+
+            if current_time >= expiry_time:
+                role = guild.get_role(int(role_id))
+                if role:
+                    try:
+                        await member.remove_roles(role)
+                        await member.send(f'你的 {role.name} 身分組已到期並被移除。')
+                    except discord.HTTPException as e:
+                        print(f"移除角色時發生錯誤: {e}")
+
+                del player['roles'][role_id]
+
+    save_players()
+    
+@tasks.loop(minutes=180)  # 每小時檢查一次
+async def check_channels_expiry_task():
+    current_time = datetime.now()
+
+    for player in players:
+        if 'channels' not in player:
+            continue
+
+        guild = discord.utils.get(bot.guilds, id=959587766017097760)  # 替換為你的伺服器ID
+
+        for channel_id, expiry_time in list(player['channels'].items()):
+            expiry_time = datetime.fromisoformat(expiry_time)
+
+            if current_time >= expiry_time:
+                channel = guild.get_channel(int(channel_id))
+                if channel:
+                    try:
+                        await channel.delete(reason="限時頻道到期自動刪除")
+                        await interaction.user.send(f'你的頻道 {channel.name} 已到期並被刪除。')
+                    except discord.HTTPException as e:
+                        print(f"刪除頻道時發生錯誤: {e}")
+
+                del player['channels'][channel_id]
+    save_players()
+    update_weather_if_needed()
+
+async def check_channel_expiry():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = datetime.now()
+        for player in players:
+            if 'channels' in player:
+                for channel_id, expiry in player['channels'].items():
+                    expiry_time = datetime.fromisoformat(expiry)
+                    time_remaining = expiry_time - now
+                    if 0 < time_remaining.days <= 3:
+                        channel = bot.get_channel(int(channel_id))
+                        if channel:
+                            text_channel = discord.utils.get(channel.guild.text_channels, name=channel.name)
+                            if text_channel:
+                                await text_channel.send(f"提醒：此頻道將在 {time_remaining.days} 天 {time_remaining.seconds // 3600} 小時後到期。")
+        await asyncio.sleep(10800)  # 每3小時檢查一次
+
+def update_weather_if_needed():
+    last_update = datetime.fromisoformat(server_info['last_weather_update'])
+    now = datetime.now()
+    
+    # 如果超過 24 小時，則更新天氣效果
+    if now - last_update >= timedelta(hours=24):
+        server_info['weather'] = random.choice(list(WEATHER_EFFECTS.keys()))
+        server_info['weather_multiplier'] = WEATHER_EFFECTS[server_info['weather']]
+        server_info['last_weather_update'] = now.isoformat()
+        save_server_info(server_info)
+        print(f"天氣已更新：{server_info['weather']}，分數增減幅度：{server_info['weather_multiplier']}x")
+        
 @bot.event
 async def on_ready():
     try:
@@ -191,6 +341,10 @@ async def on_ready():
         print(f"已同步 {len(synced)} 個指令")
     except Exception as e:
         print("An error occurred while syncing: ", e)
+    check_roles_expiry_task.start()
+    check_channels_expiry_task.start()  # 啟動頻道到期檢查任務
+    bot.loop.create_task(check_channel_expiry())
+    update_weather_if_needed()  # 檢查並更新天氣效果
 
 # 定義事件來監聽訊息並進行轉換
 @bot.event
@@ -214,7 +368,7 @@ async def register(interaction: discord.Interaction, user: discord.User = None, 
         user = interaction.user
         # 一般用戶自行註冊時，強制使用預設的分數和穩定度
         score = 1000
-        stability = 10.0
+        stability = 5.0
 
     # 如果指定了用戶且不是自己，檢查是否有管理員權限
     if user != interaction.user and interaction.user.id not in ADMIN_USER_IDS:
@@ -244,6 +398,8 @@ async def leaderboard(interaction: discord.Interaction):
     # 排序玩家
     sorted_by_score = sorted(players, key=lambda x: x['score'], reverse=True)
     sorted_by_coins = sorted(players, key=lambda x: x['coins'], reverse=True)
+    sorted_by_win_rate = sorted(players, key=lambda x: (x['wins'] / x['total_games']) if x['total_games'] > 0 else 0, reverse=True)
+    sorted_by_composite_score = sorted(players, key=calculate_composite_score, reverse=True)
 
     # 創建嵌入消息
     def create_embed(page: int, leaderboard_type: str):
@@ -256,12 +412,21 @@ async def leaderboard(interaction: discord.Interaction):
                 for i, p in enumerate(sorted_by_score[start:end]) if p['total_games'] >= 0
             ])
             title = f"積分排行榜 - 第 {page + 1} 頁"
-        else:
+        elif leaderboard_type == "coins":
             leaderboard_info = '\n'.join([
                 f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 金幣: {p['coins']}"
                 for i, p in enumerate(sorted_by_coins[start:end])
             ])
             title = f"金幣排行榜 - 第 {page + 1} 頁"
+        elif leaderboard_type == "win_rate":
+            leaderboard_info = '\n'.join([f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 勝率: {p['wins'] / (p['total_games'] if p['total_games'] > 0 else 1):.2%}\n"for i, p in enumerate(sorted_by_win_rate[start:end])])
+            title = f"勝率排行榜 - 第 {page + 1} 頁"
+        else:  # 綜合評分排行榜
+            leaderboard_info = '\n'.join([
+                f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 綜合評分: {calculate_composite_score(p)}"
+                for i, p in enumerate(sorted_by_composite_score[start:end])
+            ])
+        title = f"綜合評分排行榜 - 第 {page + 1} 頁"
 
         embed = Embed(title=title, description=leaderboard_info, color=0x00ff00)
         return embed
@@ -295,21 +460,87 @@ async def leaderboard(interaction: discord.Interaction):
         def __init__(self):
             options = [
                 discord.SelectOption(label="積分排行榜", value="score"),
-                discord.SelectOption(label="金幣排行榜", value="coins")
+                discord.SelectOption(label="金幣排行榜", value="coins"),
+                discord.SelectOption(label="勝率排行榜", value="win_rate"),
+                discord.SelectOption(label="綜合評分排行榜", value="points")  
             ]
             super().__init__(placeholder="選擇排行榜類型", options=options)
 
         async def callback(self, interaction: Interaction):
             leaderboard_type = self.values[0]
-            total_pages = (len(sorted_by_score) - 1) // PLAYERS_PER_PAGE + 1 if leaderboard_type == "score" else (len(sorted_by_coins) - 1) // PLAYERS_PER_PAGE + 1
+            if leaderboard_type == "score":
+                total_pages = (len(sorted_by_score) - 1) // PLAYERS_PER_PAGE + 1
+            elif leaderboard_type == "coins":
+                total_pages = (len(sorted_by_coins) - 1) // PLAYERS_PER_PAGE + 1
+            elif leaderboard_type == "win_rate":
+                total_pages = (len(sorted_by_win_rate) - 1) // PLAYERS_PER_PAGE + 1
+            else:  
+                total_pages = (len(sorted_by_composite_score) - 1) // PLAYERS_PER_PAGE + 1
             view = LeaderboardView(total_pages, leaderboard_type)
             await interaction.response.edit_message(embed=create_embed(0, leaderboard_type), view=view)
 
     # 創建初始視圖
     view = View()
     view.add_item(LeaderboardTypeSelect())
-    await interaction.response.send_message("請選擇要查看的排行榜類型：", view=view, ephemeral=True)
+    await interaction.response.send_message("請選擇要查看的排行榜類型：", view=view, ephemeral=False)
 
+@bot.tree.command(name="評分", description="給其他玩家評分")
+@app_commands.describe(target_user="要評分的玩家", rating="評分值")
+async def rate_player(interaction: discord.Interaction, target_user: discord.User, rating: int):
+    # 检查评分值是否在合理范围内
+    if rating < 1 or rating > 5:
+        await interaction.response.send_message("评分值必须在1到5之间。", ephemeral=True)
+        return
+
+    # 檢查用戶是否嘗試給自己評分
+    if interaction.user.id == target_user.id:
+        await interaction.response.send_message("你不能給自己評分。", ephemeral=True)
+        return
+    # 检查目标玩家是否已注册
+    target_player = next((p for p in players if p['id'] == target_user.id), None)
+    if not target_player:
+        await interaction.response.send_message(f"{target_user.name} ;尚未註冊。", ephemeral=True)
+        return
+    if 'ratings' not in target_player:
+        target_player['ratings'] = {}
+    # 检查当前用户是否已经给目标玩家评分
+    if interaction.user.id in target_player['ratings']:
+        await interaction.response.send_message("你已經給該玩家評分，不能重複評分", ephemeral=True)
+        return
+
+    # 给目标玩家评分
+    target_player['ratings'][interaction.user.id] = rating
+    save_players()
+    await interaction.response.send_message(f"你已成功给 {target_user.name} 評分：{rating}。", ephemeral=True)
+
+@bot.tree.command(name="查詢評分", description="查詢玩家目前被評分的狀況")
+@app_commands.describe(target_user="要查詢的玩家")
+async def query_ratings(interaction: discord.Interaction, target_user: discord.User = None):
+    # 如果沒有指定用戶，則默認查詢自己
+    if target_user is None:
+        target_user = interaction.user
+
+    # 檢查目標玩家是否已註冊
+    target_player = next((p for p in players if p['id'] == target_user.id), None)
+    if not target_player:
+        await interaction.response.send_message(f"{target_user.name} 尚未註冊。", ephemeral=True)
+        return
+
+    # 獲取玩家的評分信息
+    ratings = target_player.get('ratings', {})
+    
+    if not ratings:
+        await interaction.response.send_message(f"{target_user.name} 尚未收到任何評分。", ephemeral=True)
+        return
+
+    # 計算平均評分
+    average_rating = sum(ratings.values()) / len(ratings)
+
+    # 構建評分信息字串
+    rating_details = "\n".join([f"來自 <@{rater_id}> 的評分: {rating}" for rater_id, rating in ratings.items()])
+    response_message = ("\n"f"{target_user.name} 的評分狀況：\n"f"平均評分: {average_rating:.2f}\n"f"詳細評分:\n{rating_details}")
+
+    await interaction.response.send_message(response_message, ephemeral=False)
 
 
 @bot.tree.command(name="查詢分數", description="查詢玩家的分數和穩定性")
@@ -365,24 +596,31 @@ def distribute_rewards(game_id, winning_team):
             player['coins'] += reward
 
     save_players()
-    
+
+def generate_unique_game_id():
+    while True:
+        game_id = str(random.randint(1000, 9999))
+        if game_id not in games:
+            return game_id
+
 @bot.tree.command(name="創建比賽", description="創建一場新的比賽")
 async def create_game(interaction: Interaction):
     if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
         await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
         return
 
-    game_id = str(random.randint(1000, 9999))
+    game_id = generate_unique_game_id()
     games[game_id] = {
         'participants': [],
         'started': False,
-        'result_decided': False  # 用於記錄比賽結果是否已經決定
+        'result_decided': False,  # 用於記錄比賽結果是否已經決定
+        'used_items' : False
     }
     result_view = View(timeout=3600*3)
     async def update_participant_list():
         participants = games[game_id]['participants']
-        participant_list = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']}" for p in participants]) or "目前無人參加"
-        embed = Embed(title=f"房間 {game_id} 參加者名單", description=participant_list, color=0x00ff00)
+        participant_list = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']} | 綜合評分: {calculate_composite_score(p)}" for p in participants]) or "目前無人參加"
+        embed = Embed(title=f"房間 {game_id} 參加者名單({len(games[game_id]['participants'])})人", description=participant_list, color=0x00ff00)
         await interaction.edit_original_response(embed=embed, view=view)
 
     async def join_game_callback(interaction: Interaction):
@@ -411,7 +649,8 @@ async def create_game(interaction: Interaction):
             'losses': player_info['losses'],
             'team_stats': player_info['team_stats'],
             'coins': player_info['coins'],
-            'last_check_in': player_info['last_check_in']
+            'last_check_in': player_info['last_check_in'],
+            'ratings': player_info.get('ratings',{}),
         })
         await update_participant_list()
         await interaction.response.send_message("加入了這場比賽。", ephemeral=True)
@@ -439,9 +678,8 @@ async def create_game(interaction: Interaction):
             games[game_id]['team1'] = team1
             games[game_id]['team2'] = team2
 
-            team1_info = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']}" for p in team1])
-            team2_info = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']}" for p in team2])
-
+            team1_info = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']} | 綜合評分: {calculate_composite_score(p)}"for p in team1])
+            team2_info = '\n'.join([f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} 穩定性: {p['stability']} | 綜合評分: {calculate_composite_score(p)}"for p in team2])
             button1 = Button(label="Team 1 勝利", style=ButtonStyle.green)
             button2 = Button(label="Team 2 勝利", style=ButtonStyle.red)
 
@@ -479,8 +717,10 @@ async def create_game(interaction: Interaction):
                         team1 = games[game_id]['team1']
                         team2 = games[game_id]['team2']
     
+                        # 記錄按下按鈕的人
+                        winner_decider = interaction.user.display_name
                         # 假設 adjust_scores 函數返回分數變動
-                        changedValue = adjust_scores(team1, team2)
+                        changedValue = adjust_scores(team1, team2,game_id)
     
                         # 更新後的分數和變動顯示
                         team1_info = '\n'.join(
@@ -490,9 +730,13 @@ async def create_game(interaction: Interaction):
                             [f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
                         )
     
+                        # 顯示道具使用者
+                        used_item_by = games[game_id].get('used_item_by', None)
+                        used_item_effect = games[game_id].get('used_item_effect', None)
+                        item_info = f"\n\n**道具使用者:** {used_item_by}\n**道具效果:** {used_item_effect}" if used_item_by else ""
                         embed = Embed(
                             title=f"Team 1 勝利！ - 房間 {game_id} 結束！",
-                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}",color=0x00ff00
+                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}",color=0x00ff00
                         )
                         distribute_rewards(game_id, 'team1')
                         await interaction.edit_original_response(embed=embed, view=result_view)
@@ -527,8 +771,10 @@ async def create_game(interaction: Interaction):
                         team1 = games[game_id]['team1']
                         team2 = games[game_id]['team2']
     
+                        # 記錄按下按鈕的人
+                        winner_decider = interaction.user.display_name
                         # 假設 adjust_scores 函數返回分數變動
-                        changedValue = adjust_scores(team2, team1)
+                        changedValue = adjust_scores(team2, team1,game_id)
     
                         # 更新後的分數和變動顯示
                         team1_info = '\n'.join(
@@ -537,10 +783,13 @@ async def create_game(interaction: Interaction):
                         team2_info = '\n'.join(
                             [f"{interaction.guild.get_member(p['id']).display_name} 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
                         )
-    
+                        # 顯示道具使用者
+                        used_item_by = games[game_id].get('used_item_by', None)
+                        used_item_effect = games[game_id].get('used_item_effect', None)
+                        item_info = f"\n\n**道具使用者:** {used_item_by}\n**道具效果:** {used_item_effect}" if used_item_by else ""
                         embed = Embed(
                             title=f"Team 2 勝利！ - 房間 {game_id} 結束！",
-                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}",color=0x00ff00
+                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}",color=0x00ff00
                         )
                         distribute_rewards(game_id, 'team2')
                         await interaction.edit_original_response(embed=embed, view=result_view)
@@ -653,17 +902,19 @@ def update_player_data(player):
             p['total_games'] = player['total_games']
             p['wins'] = player['wins']
             p['losses'] = player['losses']
-            p['coins'] = player['coins']
-            p['last_check_in'] = player['last_check_in']
+            p['coins'] = player.get('coins',0) or 0
+            p['last_check_in'] = player.get('last_check_in') or "2025-01-01"
             break
 # 定义文件路径
 SERVER_INFO_FILE = 'server_info.txt'
 
-# 初始化服務器信息
 def initialize_server_info():
     server_info = {
         'total_matches_played': 0,
-        'dragon_gate_coins': 0
+        'dragon_gate_coins': 0,
+        'weather': "晴天",
+        'weather_multiplier': 1.0,
+        'last_weather_update': datetime.now().isoformat()  # 上次更新時間
     }
     
     if os.path.exists(SERVER_INFO_FILE):
@@ -673,21 +924,30 @@ def initialize_server_info():
                     server_info['total_matches_played'] = int(line.split(":")[1].strip())
                 elif line.startswith("Dragon Gate Coins:"):
                     server_info['dragon_gate_coins'] = int(line.split(":")[1].strip())
-    
+                elif line.startswith("Weather:"):
+                    server_info['weather'] = line.split(":")[1].strip()
+                elif line.startswith("Weather Multiplier:"):
+                    server_info['weather_multiplier'] = float(line.split(":")[1].strip())
+                elif line.startswith("Last Weather Update:"):
+                    server_info['last_weather_update'] = line.split(":")[1].strip()
     return server_info
 
-# 初始化服務器信息
+# 初始化伺服器信息
 server_info = initialize_server_info()
 total_matches_played =server_info['total_matches_played']
 def save_server_info(server_info):
     with open(SERVER_INFO_FILE, 'w') as file:
-        file.write(f"Total Matches Played: {total_matches_played}n")
-        file.write(f"Dragon Gate Coins: {server_info['dragon_gate_coins']}n")
+        file.write(f"Total Matches Played: {server_info['total_matches_played']}\n")
+        file.write(f"Dragon Gate Coins: {server_info['dragon_gate_coins']}\n")
+        file.write(f"Weather: {server_info['weather']}\n")
+        file.write(f"Weather Multiplier: {server_info['weather_multiplier']}\n")
+        file.write(f"Last Weather Update: {server_info['last_weather_update']}\n")
         
 
+save_server_info(server_info)
 def calculate_stability_change(opponent_win_rate, player_total_games, total_matches_played, total_players, current_stability):
     # 调整基础稳定度变化范围
-    base_stability_change = 2 if opponent_win_rate > 0.7 else -3
+    base_stability_change = 1.5 if opponent_win_rate >= 0.8 else -3
 
     # 根据总场数、玩家总场数和玩家总数缩放变化量
     player_influence = player_total_games / max(1, total_matches_played)
@@ -706,7 +966,7 @@ def calculate_stability_change(opponent_win_rate, player_total_games, total_matc
     return stability_change
 
 
-def adjust_scores(winning_team, losing_team):
+def adjust_scores(winning_team, losing_team,game_id):
     global total_matches_played
     total_matches_played += 1  # 每次调用此函数时，增加总进行场数
 
@@ -714,16 +974,41 @@ def adjust_scores(winning_team, losing_team):
     average_score = sum(player['score'] for player in all_players) / len(all_players)
 
     base_score_increase = 20
-    base_score_decrease = 19
-
+    base_score_decrease = 20
+    
+    # 應用天氣效果
+    weather = server_info.get('weather', "晴天")  # 默認為晴天
+    weather_multiplier = server_info.get('weather_multiplier', 1.0)
+    if game_id in games and 'used_item_effect' in games[game_id] and games[game_id]['used_item_effect'] != 'ignore_weather':
+        base_score_increase *= weather_multiplier
+        base_score_decrease *= weather_multiplier
+        
+    # 應用道具效果
+    if game_id in games and 'used_item_effect' in games[game_id]:
+        effect = games[game_id]['used_item_effect']
+        if effect == "increase_score_multiplier":
+            base_score_increase *= 1.2
+            base_score_decrease *= 1.2
+        elif effect == "decrease_score_multiplier":
+            base_score_increase *= 0.8
+            base_score_decrease *= 0.8
+        elif effect == "reverse_score":
+            if random.random() < 0.5:
+                base_score_increase *= -1
+                base_score_decrease *= -1
+        elif effect == "double_score":
+            base_score_increase *= 2
+            base_score_decrease *= 2
+        # 其他道具效果（如增加穩定性）可以在這裡處理
+    
     score_changes = {}
     stability_changes = {}
     for player in winning_team:
         score_difference = player['score'] - average_score
-        score_increase = base_score_increase * (1 - score_difference / average_score)
+        score_increase = base_score_increase * ((1 - score_difference / average_score) **2 )
         score_increase *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(50, score_increase))
+        score_change = max(1, min(40, score_increase))
         player['score'] += score_change
         player['score'] = round(player['score'], 2)
 
@@ -736,7 +1021,7 @@ def adjust_scores(winning_team, losing_team):
         
         # 根据对手的胜率和总场数调整稳定度
         stability_change = calculate_stability_change(opponent_win_rate,sum(max(1, p.get('total_games', 1)) for p in winning_team if p.get('total_games', 0) > 0),total_matches_played,len(all_players),player['stability'])
-        player['stability'] = max(0, min(10, player['stability'] + stability_change))
+        player['stability'] = max(0, min(5, player['stability'] + stability_change))
         player['stability'] = round(player['stability'], 2)  # 保留小數點兩位
         player['total_games'] += 1
         player['wins'] += 1
@@ -752,10 +1037,10 @@ def adjust_scores(winning_team, losing_team):
 
     for player in losing_team:
         score_difference = player['score'] - average_score
-        score_decrease = base_score_decrease * (1 + score_difference / average_score)
+        score_decrease = base_score_decrease * ((1 + score_difference / average_score)**2)
         score_decrease *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(50, score_decrease))
+        score_change = max(1, min(40, score_decrease))
         player['score'] -= score_change
         player['score'] = round(player['score'], 2)
 
@@ -767,7 +1052,7 @@ def adjust_scores(winning_team, losing_team):
             opponent_win_rate = 0  # 或者其他適當的預設值
         # 根据对手的胜率和总场数调整稳定度
         stability_change = calculate_stability_change(opponent_win_rate,sum(max(1, p.get('total_games', 1)) for p in losing_team if p.get('total_games', 0) > 0),total_matches_played,len(all_players),player['stability'])
-        player['stability'] = max(0, min(10, player['stability'] + stability_change))
+        player['stability'] = max(0, min(5, player['stability'] + stability_change))
         player['stability'] = round(player['stability'], 2)  # 保留小數點兩位
         player['total_games'] += 1
         player['losses'] += 1
@@ -1424,7 +1709,453 @@ async def server_status(interaction: discord.Interaction):
 
     # 發送嵌入消息
     await interaction.response.send_message(embed=embed, ephemeral=False)
+    
+AVAILABLE_ROLES = [
+    ("世紀富豪 1天 (可移動世紀頻道的人、靜言、拒聽)",1342032524443910164, 10, 1),  # Role1 需要 10 金幣，有效期 1 天
+]
 
+class RoleSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=f"{name} - {coins} 金幣",
+                value=name
+            )
+            for name, role , coins, days in AVAILABLE_ROLES
+        ]
+        super().__init__(placeholder="選擇要購買的身分組", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        role_name = self.values[0]
+        role_info = next((r for r in AVAILABLE_ROLES if r[0] == role_name), None)
+        
+        if not role_info:
+            await interaction.response.send_message('找不到該身分組！', ephemeral=True)
+            return
+
+        name,role, required_coins, days = role_info
+        role_obj = discord.utils.get(interaction.guild.roles, id=role)
+        if role_obj is None:
+            await interaction.response.send_message(f'伺服器中找不到角色：{role}。請確認角色名稱是否正確。', ephemeral=True)
+            return
+
+        # 檢查玩家是否已註冊
+        player = next((p for p in players if p['id'] == interaction.user.id), None)
+        if not player:
+            await interaction.response.send_message('你尚未註冊。', ephemeral=True)
+            return
+
+        # 檢查用戶是否有足夠的金幣
+        if player['coins'] < required_coins:
+            await interaction.response.send_message('你的金幣不足以購買這個身分組。', ephemeral=True)
+            return
+
+        # 扣除金幣並添加角色
+        player['coins'] -= required_coins
+        expiry_time = datetime.now() + timedelta(days=days)
+        if 'roles' not in player:
+            player['roles'] ={}
+        player['roles'][role] = expiry_time.isoformat()
+        save_players()
+
+        await interaction.user.add_roles(role_obj)
+        await interaction.response.send_message(f'{interaction.user.display_name} 已購買 {role_name} 身分組！')
+
+@bot.tree.command(name="購買身分組", description="購買自定義身分組並設置期限")
+async def buy_role(interaction: discord.Interaction):
+    view = View()
+    view.add_item(RoleSelect())
+    await interaction.response.send_message("請選擇要購買的身分組：", view=view, ephemeral=True)
+
+@bot.tree.command(name="猜拳賭博", description="開始一場猜拳賭博遊戲")
+async def start_rock_paper_scissors(interaction: Interaction, bet_amount: int):
+    if bet_amount <= 0:
+        await interaction.response.send_message("賭注金額必須大於零。", ephemeral=True)
+        return
+
+    game_id = generate_unique_game_id()
+    games[game_id] = {
+        'participants': [],
+        'started': False,
+        'result_decided': False,
+        'bet_amount': bet_amount
+    }
+    async def join_game_callback(interaction: Interaction):
+        user_id = interaction.user.id
+        player_info = next((p for p in players if p['id'] == user_id), None)
+    
+        if not player_info:
+            await interaction.response.send_message("你的資料不在系統中，請聯繫管理員。", ephemeral=True)
+            return
+    
+        if player_info['coins'] < bet_amount:
+            await interaction.response.send_message("你的金幣不足以參加這場遊戲。", ephemeral=True)
+            return
+    
+        if any(p['id'] == user_id for p in games[game_id]['participants']):
+            await interaction.response.send_message("你已經加入了這場遊戲。", ephemeral=True)
+            return
+    
+        # 將玩家添加到參與者列表中
+        games[game_id]['participants'].append({
+            'id': player_info['id'],
+            'userName': player_info['userName'],
+            'coins': player_info['coins'],
+            'bet_amount': bet_amount
+        })
+
+        # 更新參賽者列表
+        participant_names = [p['userName'] for p in games[game_id]['participants']]
+        participant_list = "\n".join(participant_names)
+        # 編輯原始訊息以顯示更新的參賽者名單
+        await interaction.message.edit(content=f"遊戲已創建，ID: {game_id}。賭注金額為 {bet_amount} 金幣。\n\n目前參賽者：\n{participant_list}")
+        # 更新訊息以顯示參賽者
+        await interaction.response.send_message(f"你已加入遊戲，並扣除了賭注金額。\n\n目前參賽者：\n{participant_list}",ephemeral=True)
+
+
+    async def play_game_callback(interaction: Interaction):
+        if games[game_id]['started']:
+            await interaction.response.send_message("遊戲已經開始。", ephemeral=True)
+            return
+
+        if len(games[game_id]['participants']) < 2:
+            await interaction.response.send_message("參加人數不足，無法開始遊戲。", ephemeral=True)
+            return
+
+        for participant in games[game_id]['participants']:
+            player_info = next((p for p in players if p['id'] == participant['id']), None)
+            if player_info:
+                player_info['coins'] -= participant['bet_amount']
+                update_player_coins(player_info['id'], player_info['coins'])
+        games[game_id]['started'] = True
+        await interaction.response.send_message("遊戲開始！請選擇你的出拳。", ephemeral=True)
+
+        # 設置猜拳按鈕
+        rock_button = Button(label="石頭", style=ButtonStyle.primary)
+        paper_button = Button(label="布", style=ButtonStyle.primary)
+        scissors_button = Button(label="剪刀", style=ButtonStyle.primary)
+
+        async def rock_callback(interaction: Interaction):
+            await process_choice(interaction, "石頭")
+
+        async def paper_callback(interaction: Interaction):
+            await process_choice(interaction, "布")
+
+        async def scissors_callback(interaction: Interaction):
+            await process_choice(interaction, "剪刀")
+
+        rock_button.callback = rock_callback
+        paper_button.callback = paper_callback
+        scissors_button.callback = scissors_callback
+
+        choice_view = View()
+        choice_view.add_item(rock_button)
+        choice_view.add_item(paper_button)
+        choice_view.add_item(scissors_button)
+
+        await interaction.followup.send("請選擇你的出拳：", view=choice_view)
+
+    async def process_choice(interaction: Interaction, choice: str):
+        user_id = interaction.user.id
+        participant = next((p for p in games[game_id]['participants'] if p['id'] == user_id), None)
+        if not participant:
+            await interaction.response.send_message("你不在這場遊戲中。", ephemeral=True)
+            return
+
+        participant['choice'] = choice
+        await interaction.response.send_message(f"你選擇了 {choice}。", ephemeral=True)
+
+        # 檢查是否所有玩家都已選擇
+        if all('choice' in p for p in games[game_id]['participants']):
+            await determine_winner(interaction)
+
+    async def determine_winner(interaction: Interaction):
+        choices = [p['choice'] for p in games[game_id]['participants']]
+        unique_choices = set(choices)
+
+        if len(unique_choices) == 1:
+            result = "平手！"
+            # 退還賭注金額
+            for player in games[game_id]['participants']:
+                player['coins'] += player['bet_amount']
+                update_player_coins(player['id'], player['coins'])
+        else:
+            if "石頭" in unique_choices and "剪刀" in unique_choices:
+                result = "石頭勝！"
+                winner = "石頭"
+            elif "剪刀" in unique_choices and "布" in unique_choices:
+                result = "剪刀勝！"
+                winner = "剪刀"
+            elif "布" in unique_choices and "石頭" in unique_choices:
+                result = "布勝！"
+                winner = "布"
+            else:
+                result = "無法決定勝負。"
+                winner = None
+
+            if winner:
+                winning_players = [p for p in games[game_id]['participants'] if p['choice'] == winner]
+                total_bet = sum(p['bet_amount'] for p in games[game_id]['participants'])
+                reward = total_bet / len(winning_players)
+                for player in winning_players:
+                    player['coins'] += reward
+                    update_player_coins(player['id'], player['coins'])
+
+        embed = Embed(title="猜拳結果", description=result, color=0x00ff00)
+        await interaction.followup.send(embed=embed)
+        del games[game_id]
+
+    join_button = Button(label="加入遊戲", style=ButtonStyle.primary)
+    play_button = Button(label="開始遊戲", style=ButtonStyle.green)
+
+    join_button.callback = join_game_callback
+    play_button.callback = play_game_callback
+
+    view = View()
+    view.add_item(join_button)
+    view.add_item(play_button)
+
+    await interaction.response.send_message(f'遊戲已創建，ID: {game_id}。賭注金額為 {bet_amount} 金幣。點擊按鈕加入或開始遊戲。', view=view)
+
+def update_player_coins(player_id, new_coins):
+    # 假設這個函數會更新玩家的金幣數量到資料庫或資料結構中
+    for player in players:
+        if player['id'] == player_id:
+            player['coins'] = new_coins
+            break
+            
+@bot.tree.command(name="購買臨時頻道", description="購買一個限時頻道")
+@app_commands.describe(channel_name="你想創建的頻道名稱", duration="頻道存在的時間（以日為單位 週/1金幣）")
+async def buy_temporary_channel(interaction: discord.Interaction, channel_name: str, duration: int):
+    # 檢查玩家是否已註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你需要先使用 /註冊 指令註冊。", ephemeral=True)
+        return
+
+    # 檢查玩家是否有足夠的 coins
+    channel_cost = 1  # 假設創建頻道需要 100 coins
+    channel_cost *= duration
+    if player['coins'] < channel_cost:
+        await interaction.response.send_message("你的 coins 不足以購買頻道。", ephemeral=True)
+        return
+
+    # 獲取類別
+    category = discord.utils.get(interaction.guild.categories, id=1342061227647696978)
+    if not category:
+        await interaction.response.send_message("指定的類別不存在。", ephemeral=True)
+        return
+
+    # 設置頻道權限
+    overwrites = {
+        interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, manage_channels=True, manage_permissions=True)
+    }
+
+    # 創建頻道
+    channel = await interaction.guild.create_voice_channel(name=channel_name, category=category, overwrites=overwrites)
+    # 計算到期時間
+    expiry_time = datetime.now() + timedelta(weeks=duration)
+    if 'channels' not in player:
+        player['channels'] = {}
+    player['channels'][str(channel.id)] = expiry_time.isoformat()
+
+    # 從玩家的 coins 中扣除
+    player['coins'] -= channel_cost
+    save_players()
+
+    await interaction.response.send_message(f"頻道 '{channel_name}' 已在 {category.name} 下創建，並且你擁有管理權限。該頻道將在 {duration} 週後自動刪除。", ephemeral=True)
+
+@bot.tree.command(name="延長期限", description="延長當前語音頻道的期限")
+@app_commands.describe(additional_duration="延長的時間（以週為單位）")
+async def extend_channel_duration(interaction: discord.Interaction, additional_duration: int):
+    # 獲取當前語音頻道
+    if not interaction.channel or not isinstance(interaction.channel, discord.VoiceChannel):
+        await interaction.response.send_message("此指令必須在語音頻道的聊天窗口中使用。", ephemeral=True)
+        return
+
+    channel_id = str(interaction.channel.id)
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player or 'channels' not in player or channel_id not in player['channels']:
+        await interaction.response.send_message("你沒有管理這個頻道或頻道不存在。", ephemeral=True)
+        return
+
+    # 計算延長所需的金幣
+    extension_cost = additional_duration  # 假設每週需要1金幣
+    if player['coins'] < extension_cost:
+        await interaction.response.send_message("你的 coins 不足以延長頻道期限。", ephemeral=True)
+        return
+
+    # 更新到期時間
+    current_expiry = datetime.fromisoformat(player['channels'][channel_id])
+    new_expiry = current_expiry + timedelta(weeks=additional_duration)
+    player['channels'][channel_id] = new_expiry.isoformat()
+
+    # 扣除金幣
+    player['coins'] -= extension_cost
+    save_players()
+
+    await interaction.response.send_message(f"頻道的期限已延長至 {new_expiry.strftime('%Y-%m-%d %H:%M:%S')}", ephemeral=True)
+
+# 自動補全道具名稱
+async def item_autocomplete(interaction: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name=item, value=item)
+        for item in ITEMS.keys() if current.lower() in item.lower()
+    ]
+
+@bot.tree.command(name="購買道具", description="購買道具")
+@app_commands.describe(item_name="道具名稱")
+@app_commands.autocomplete(item_name=item_autocomplete)
+async def buy_item(interaction: discord.Interaction, item_name: str):
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
+        return
+
+    # 檢查道具是否存在
+    if item_name not in ITEMS:
+        await interaction.response.send_message("找不到該道具，請確認道具名稱是否正確。", ephemeral=True)
+        return
+
+    # 檢查玩家是否已註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你尚未註冊，請先註冊後再購買道具。", ephemeral=True)
+        return
+
+    # 檢查玩家是否有足夠的金幣
+    item = ITEMS[item_name]
+    if player['coins'] < item['price']:
+        await interaction.response.send_message("你的金幣不足以購買這個道具。", ephemeral=True)
+        return
+
+    # 初始化 items 字段（如果不存在）
+    if 'items' not in player:
+        player['items'] = {}
+
+    # 扣除金幣並添加道具
+    player['coins'] -= item['price']
+    if item_name in player['items']:
+        player['items'][item_name] += 1  # 如果已經有該道具，增加數量
+    else:
+        player['items'][item_name] = 1  # 如果沒有該道具，初始化數量為 1
+    save_players()
+
+    await interaction.response.send_message(f"你已成功購買 {item_name}！", ephemeral=True)
+
+@bot.tree.command(name="使用道具", description="在比賽中使用道具")
+@app_commands.describe(item_name="道具名稱", game_id="比賽ID")
+@app_commands.autocomplete(item_name=item_autocomplete)
+async def use_item(interaction: discord.Interaction, item_name: str, game_id: str):
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
+        return
+
+    # 檢查道具是否存在
+    if item_name not in ITEMS:
+        await interaction.response.send_message("找不到該道具，請確認道具名稱是否正確。", ephemeral=True)
+        return
+
+    # 檢查玩家是否已註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你尚未註冊，請先註冊後再使用道具。", ephemeral=True)
+        return
+
+    # 初始化 items 字段（如果不存在）
+    if 'items' not in player:
+        player['items'] = {}
+
+    # 檢查玩家是否擁有該道具
+    if item_name not in player['items'] or player['items'][item_name] <= 0:
+        await interaction.response.send_message("你沒有這個道具。", ephemeral=True)
+        return
+
+    # 檢查比賽是否存在
+    if game_id not in games:
+        await interaction.response.send_message("找不到該比賽，請確認比賽ID是否正確。", ephemeral=True)
+        return
+
+    # 檢查比賽是否已經開始
+    if games[game_id]['started']:
+        await interaction.response.send_message("比賽已經開始，無法使用道具。", ephemeral=True)
+        return
+
+    # 檢查是否已經有人使用過道具
+    if 'used_items' in games[game_id] and games[game_id]['used_items']:
+        await interaction.response.send_message("本場比賽已經有人使用過道具了。", ephemeral=True)
+        return
+
+    # 使用道具
+    item = ITEMS[item_name]
+    games[game_id]['used_items'] = True
+    games[game_id]['used_item_by'] = interaction.user.display_name
+    games[game_id]['used_item_effect'] = item['effect']
+
+    # 移除道具（減少數量）
+    player['items'][item_name] -= 1
+    if player['items'][item_name] == 0:
+        del player['items'][item_name]  # 如果數量為 0，移除該道具
+    save_players()
+
+    await interaction.response.send_message(f"你已成功使用 {item_name}！", ephemeral=True)
+    
+@bot.tree.command(name="查詢道具", description="查詢你擁有的道具")
+async def query_items(interaction: discord.Interaction):
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
+        return
+
+    # 檢查玩家是否已註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你尚未註冊，請先註冊後再查詢道具。", ephemeral=True)
+        return
+
+    # 初始化 items 字段（如果不存在）
+    if 'items' not in player:
+        player['items'] = {}
+
+    # 檢查玩家是否擁有道具
+    if not player['items']:
+        await interaction.response.send_message("你目前沒有道具。", ephemeral=True)
+        return
+
+    # 構建道具列表
+    items_list = "\n".join([f"{item_name} x {quantity}" for item_name, quantity in player['items'].items()])
+    await interaction.response.send_message(f"你擁有的道具：\n{items_list}", ephemeral=True)
+
+@bot.tree.command(name="查詢天氣", description="查詢當前的天氣效果及其對分數增減的影響")
+async def query_weather(interaction: discord.Interaction):
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
+        return
+
+    # 獲取當前天氣
+    weather = server_info.get('weather', "晴天")  # 默認為晴天
+    weather_multiplier = WEATHER_EFFECTS.get(weather, 1.0)  # 默認倍率為 1.0
+
+    # 構建回覆訊息
+    response_message = (
+        f"**當前天氣：** {weather}\n"
+        f"**分數增減倍率：** {weather_multiplier}x\n"
+        f"**效果描述：** {get_weather_description(weather)}"
+    )
+
+    # 回覆用戶
+    await interaction.response.send_message(response_message)
+
+def get_weather_description(weather: str) -> str:
+    """根據天氣返回效果描述"""
+    descriptions = {
+        "晴天": "分數增減幅度正常。",
+        "暴風雨": "分數增減幅度增加 50%。",
+        "微風": "分數增減幅度減少 20%。",
+        "雷電": "分數增減幅度大幅增加 100%。",
+        "霧霾": "分數增減幅度隨機波動（0.5x 到 1.5x）。"
+    }
+    return descriptions.get(weather, "未知天氣效果。")
+    
 @bot.tree.command(name="help", description="顯示所有可用指令及其描述")
 async def help_command(interaction: discord.Interaction):
     help_text = (
@@ -1448,6 +2179,14 @@ async def help_command(interaction: discord.Interaction):
         "/贈送金幣 - 將金幣贈送給其他玩家\n"
         "/簽到 - 每日簽到獲取金幣\n"
         "/投注 - 投注比賽\n"
+        "/猜拳賭博 - 猜拳賭博\n"
+        "/購買身分組 - 購買身分組\n"
+        "/購買臨時頻道 - 買一個臨時頻道 自己有該頻道所有權限\n"
+        "/延長期限 - 延長當前語音頻道的期限\n"
+        "/購買道具 <道具名稱> - 購買道具\n"
+        "/使用道具 <道具名稱> <比賽ID> - 在比賽中使用道具\n"
+        "/查詢道具 - 查詢你擁有的道具\n"
+        "/查詢天氣 - 查詢目前伺服器天氣\n"
     )
     await interaction.response.send_message(help_text)
 
