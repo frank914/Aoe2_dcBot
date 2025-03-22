@@ -19,9 +19,9 @@ ADMIN_USER_IDS = [584371520395149312]
 # 定義天氣效果
 WEATHER_EFFECTS = {
     "晴天": 1.0,  # 分數增減幅度正常
-    "暴風雨": 1.5,  # 分數增減幅度增加
+    "暴風雨": 1.2,  # 分數增減幅度增加
     "微風": 0.8,  # 分數增減幅度減少
-    "雷電": 2.0,  # 分數增減幅度大幅增加
+    "雷電": 1.4,  # 分數增減幅度大幅增加
     "霧霾": random.uniform(0.5, 1.5)  # 分數增減幅度隨機波動
 }
 
@@ -136,7 +136,7 @@ def save_players():
         print(f"保存玩家数据时发生错误: {e}")
 		
 
-# 註冊玩家
+# 註冊玩家時初始化名聲字段
 def register_player(user_id, score, stability, userName):
     players.append({
         'id': user_id,
@@ -151,7 +151,9 @@ def register_player(user_id, score, stability, userName):
         'last_check_in': 0,
         'ratings': {},
         'roles': {},  # 新增字段，用于存储购买的角色及其到期时间
-        'items': {}  # 新增字段，用于存储道具及其数量
+        'items': {},  # 新增字段，用于存储道具及其数量
+        'reputation': 0,  # 新增字段，用于存储名聲
+        'last_reputation_change': 0  # 新增字段，用于记录上次更改名聲的时间
     })
     save_players()
 players = load_players()
@@ -341,7 +343,7 @@ async def on_ready():
         print(f"已同步 {len(synced)} 個指令")
     except Exception as e:
         print("An error occurred while syncing: ", e)
-    check_roles_expiry_task.start()
+  #  check_roles_expiry_task.start()
     check_channels_expiry_task.start()  # 啟動頻道到期檢查任務
     bot.loop.create_task(check_channel_expiry())
     update_weather_if_needed()  # 檢查並更新天氣效果
@@ -362,7 +364,7 @@ async def on_message(message):
 
 @bot.tree.command(name="註冊", description="註冊玩家並設置初始分數和穩定度")
 @app_commands.describe(user="要註冊的用戶", score="玩家分數", stability="玩家穩定度")
-async def register(interaction: discord.Interaction, user: discord.User = None, score: int = 1000, stability: float = 10.0):
+async def register(interaction: discord.Interaction, user: discord.User = None, score: int = 1000, stability: float = 5.0):
     # 如果沒有指定用戶，則默認為註冊自己
     if user is None:
         user = interaction.user
@@ -400,6 +402,7 @@ async def leaderboard(interaction: discord.Interaction):
     sorted_by_coins = sorted(players, key=lambda x: x['coins'], reverse=True)
     sorted_by_win_rate = sorted(players, key=lambda x: (x['wins'] / x['total_games']) if x['total_games'] > 0 else 0, reverse=True)
     sorted_by_composite_score = sorted(players, key=calculate_composite_score, reverse=True)
+    sorted_by_reputation = sorted(players, key=lambda x: x.get('reputation', 0), reverse=True)  # 按名聲排序
 
     # 創建嵌入消息
     def create_embed(page: int, leaderboard_type: str):
@@ -421,12 +424,18 @@ async def leaderboard(interaction: discord.Interaction):
         elif leaderboard_type == "win_rate":
             leaderboard_info = '\n'.join([f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 勝率: {p['wins'] / (p['total_games'] if p['total_games'] > 0 else 1):.2%}\n"for i, p in enumerate(sorted_by_win_rate[start:end])])
             title = f"勝率排行榜 - 第 {page + 1} 頁"
+        elif leaderboard_type == "reputation":
+            leaderboard_info = '\n'.join([
+                f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 名聲: {p.get('reputation', 0)}"
+                for i, p in enumerate(sorted_by_reputation[start:end])
+            ])
+            title = f"名聲排行榜 - 第 {page + 1} 頁"
         else:  # 綜合評分排行榜
             leaderboard_info = '\n'.join([
                 f"{page*PLAYERS_PER_PAGE+i+1}. {interaction.guild.get_member(p['id']).display_name} - 綜合評分: {calculate_composite_score(p)}"
                 for i, p in enumerate(sorted_by_composite_score[start:end])
             ])
-        title = f"綜合評分排行榜 - 第 {page + 1} 頁"
+            title = f"綜合評分排行榜 - 第 {page + 1} 頁"
 
         embed = Embed(title=title, description=leaderboard_info, color=0x00ff00)
         return embed
@@ -462,6 +471,7 @@ async def leaderboard(interaction: discord.Interaction):
                 discord.SelectOption(label="積分排行榜", value="score"),
                 discord.SelectOption(label="金幣排行榜", value="coins"),
                 discord.SelectOption(label="勝率排行榜", value="win_rate"),
+                discord.SelectOption(label="名聲排行榜", value="reputation"),  # 新增名聲排行榜選項
                 discord.SelectOption(label="綜合評分排行榜", value="points")  
             ]
             super().__init__(placeholder="選擇排行榜類型", options=options)
@@ -474,6 +484,8 @@ async def leaderboard(interaction: discord.Interaction):
                 total_pages = (len(sorted_by_coins) - 1) // PLAYERS_PER_PAGE + 1
             elif leaderboard_type == "win_rate":
                 total_pages = (len(sorted_by_win_rate) - 1) // PLAYERS_PER_PAGE + 1
+            elif leaderboard_type == "reputation":
+                total_pages = (len(sorted_by_reputation) - 1) // PLAYERS_PER_PAGE + 1
             else:  
                 total_pages = (len(sorted_by_composite_score) - 1) // PLAYERS_PER_PAGE + 1
             view = LeaderboardView(total_pages, leaderboard_type)
@@ -730,13 +742,22 @@ async def create_game(interaction: Interaction):
                             [f"{interaction.guild.get_member(p['id']).display_name} - 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
                         )
     
+                        # 獲取當前天氣
+                        weather = server_info.get('weather', "晴天")  # 默認為晴天
+                        weather_multiplier = WEATHER_EFFECTS.get(weather, 1.0)  # 默認倍率為 1.0
+                       
                         # 顯示道具使用者
                         used_item_by = games[game_id].get('used_item_by', None)
                         used_item_effect = games[game_id].get('used_item_effect', None)
                         item_info = f"\n\n**道具使用者:** {used_item_by}\n**道具效果:** {used_item_effect}" if used_item_by else ""
+                        response_message = (
+                            f"\n**當前天氣：** {weather}\n"
+                            f"**分數增減倍率：** {weather_multiplier}x\n"
+                            f"**效果描述：** {get_weather_description(weather)}"
+                        )
                         embed = Embed(
                             title=f"Team 1 勝利！ - 房間 {game_id} 結束！",
-                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}",color=0x00ff00
+                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}{response_message}",color=0x00ff00
                         )
                         distribute_rewards(game_id, 'team1')
                         await interaction.edit_original_response(embed=embed, view=result_view)
@@ -783,13 +804,21 @@ async def create_game(interaction: Interaction):
                         team2_info = '\n'.join(
                             [f"{interaction.guild.get_member(p['id']).display_name} 分數: {p['score']} ({changedValue[0][p['id']]}), 穩定度: {p['stability']}({changedValue[1][p['id']]})" for p in team2]
                         )
+                        # 獲取當前天氣
+                        weather = server_info.get('weather', "晴天")  # 默認為晴天
+                        weather_multiplier = WEATHER_EFFECTS.get(weather, 1.0)  # 默認倍率為 1.0
                         # 顯示道具使用者
                         used_item_by = games[game_id].get('used_item_by', None)
                         used_item_effect = games[game_id].get('used_item_effect', None)
                         item_info = f"\n\n**道具使用者:** {used_item_by}\n**道具效果:** {used_item_effect}" if used_item_by else ""
+                        response_message = (
+                            f"\n**當前天氣：** {weather}\n"
+                            f"**分數增減倍率：** {weather_multiplier}x\n"
+                            f"**效果描述：** {get_weather_description(weather)}"
+                        )
                         embed = Embed(
                             title=f"Team 2 勝利！ - 房間 {game_id} 結束！",
-                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}",color=0x00ff00
+                            description=f"**Team 1 成員:**\n{team1_info}\n\n**Team 2 成員:**\n{team2_info}**\n\n按下勝利按鈕的人:** {winner_decider}{item_info}{response_message}",color=0x00ff00
                         )
                         distribute_rewards(game_id, 'team2')
                         await interaction.edit_original_response(embed=embed, view=result_view)
@@ -911,10 +940,11 @@ SERVER_INFO_FILE = 'server_info.txt'
 def initialize_server_info():
     server_info = {
         'total_matches_played': 0,
-        'dragon_gate_coins': 0,
         'weather': "晴天",
         'weather_multiplier': 1.0,
-        'last_weather_update': datetime.now().isoformat()  # 上次更新時間
+        'last_weather_update': datetime.now().isoformat(),  # 上次更新時間
+        'slot_total_bet': 0,  # 拉霸總投注金額
+        'slot_total_payout': 0  # 拉霸總打出的金額
     }
     
     if os.path.exists(SERVER_INFO_FILE):
@@ -922,14 +952,16 @@ def initialize_server_info():
             for line in file:
                 if line.startswith("Total Matches Played:"):
                     server_info['total_matches_played'] = int(line.split(":")[1].strip())
-                elif line.startswith("Dragon Gate Coins:"):
-                    server_info['dragon_gate_coins'] = int(line.split(":")[1].strip())
                 elif line.startswith("Weather:"):
                     server_info['weather'] = line.split(":")[1].strip()
                 elif line.startswith("Weather Multiplier:"):
                     server_info['weather_multiplier'] = float(line.split(":")[1].strip())
                 elif line.startswith("Last Weather Update:"):
                     server_info['last_weather_update'] = line.split(":")[1].strip()
+                elif line.startswith("Slot Total Bet:"):
+                    server_info['slot_total_bet'] = int(line.split(":")[1].strip())
+                elif line.startswith("Slot Total Payout:"):
+                    server_info['slot_total_payout'] = int(line.split(":")[1].strip())
     return server_info
 
 # 初始化伺服器信息
@@ -938,10 +970,11 @@ total_matches_played =server_info['total_matches_played']
 def save_server_info(server_info):
     with open(SERVER_INFO_FILE, 'w') as file:
         file.write(f"Total Matches Played: {server_info['total_matches_played']}\n")
-        file.write(f"Dragon Gate Coins: {server_info['dragon_gate_coins']}\n")
         file.write(f"Weather: {server_info['weather']}\n")
         file.write(f"Weather Multiplier: {server_info['weather_multiplier']}\n")
         file.write(f"Last Weather Update: {server_info['last_weather_update']}\n")
+        file.write(f"Slot Total Bet: {server_info['slot_total_bet']}\n")  # 拉霸總投注金額
+        file.write(f"Slot Total Payout: {server_info['slot_total_payout']}\n")  # 拉霸總打出的金額
         
 
 save_server_info(server_info)
@@ -982,13 +1015,14 @@ def adjust_scores(winning_team, losing_team,game_id):
     if game_id in games and 'used_item_effect' in games[game_id] and games[game_id]['used_item_effect'] != 'ignore_weather':
         base_score_increase *= weather_multiplier
         base_score_decrease *= weather_multiplier
-        
+    MAX_EFFECT = 40
     # 應用道具效果
     if game_id in games and 'used_item_effect' in games[game_id]:
         effect = games[game_id]['used_item_effect']
         if effect == "increase_score_multiplier":
             base_score_increase *= 1.2
             base_score_decrease *= 1.2
+            MAX_EFFECT *= 1.2
         elif effect == "decrease_score_multiplier":
             base_score_increase *= 0.8
             base_score_decrease *= 0.8
@@ -999,6 +1033,7 @@ def adjust_scores(winning_team, losing_team,game_id):
         elif effect == "double_score":
             base_score_increase *= 2
             base_score_decrease *= 2
+            MAX_EFFECT *= 2
         # 其他道具效果（如增加穩定性）可以在這裡處理
     
     score_changes = {}
@@ -1008,7 +1043,7 @@ def adjust_scores(winning_team, losing_team,game_id):
         score_increase = base_score_increase * ((1 - score_difference / average_score) **2 )
         score_increase *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(40, score_increase))
+        score_change = max(1, min(MAX_EFFECT, score_increase))
         player['score'] += score_change
         player['score'] = round(player['score'], 2)
 
@@ -1040,7 +1075,7 @@ def adjust_scores(winning_team, losing_team,game_id):
         score_decrease = base_score_decrease * ((1 + score_difference / average_score)**2)
         score_decrease *= (1 + (player['stability']) / 10)
 
-        score_change = max(1, min(40, score_decrease))
+        score_change = max(1, min(MAX_EFFECT, score_decrease))
         player['score'] -= score_change
         player['score'] = round(player['score'], 2)
 
@@ -1656,6 +1691,141 @@ async def daily_check_in(interaction: discord.Interaction):
     # 發送訊息給所有人
     await interaction.response.send_message(f"{display_name} 簽到成功！獲得了 {daily_coins} 金幣。現在有 {player['coins']} 金幣。")
 
+# 固定下注金額
+FIXED_BET_AMOUNT = 5
+
+# 定義拉霸符號及其對應的獎勵金額和出現機率
+SLOT_SYMBOLS = [
+    {"symbol": "🍒", "reward": 1, "probability": 0.33},   # 櫻桃，1 金幣，33% 機率
+    {"symbol": "🍋", "reward": 1, "probability": 0.33},   # 檸檬，1 金幣，32% 機率
+    {"symbol": "🍊", "reward": 2, "probability": 0.25},   # 橙子，2 金幣，26% 機率
+    {"symbol": "🍈", "reward": 3, "probability": 0.05},   # 哈密瓜，3 金幣，5% 機率
+    {"symbol": "🍇", "reward": 5, "probability": 0.03},   # 葡萄，5 金幣，3% 機率
+    {"symbol": "🍓", "reward": 8, "probability": 0.008},   # 草莓，8 金幣，0.8% 機率
+    {"symbol": "🍉", "reward": 10, "probability": 0.0018}, # 西瓜，10 金幣，0.18% 機率
+    {"symbol": "💰", "reward": 20, "probability": 0.0002}  # 錢袋，20 金幣，0.02% 機率
+]
+
+async def spin_slot_machine():
+    # 模擬拉霸機轉動
+    symbols = [s["symbol"] for s in SLOT_SYMBOLS]
+    probabilities = [s["probability"] for s in SLOT_SYMBOLS]
+    result = random.choices(symbols, weights=probabilities, k=3)  # 隨機選擇 3 個符號
+    return result
+
+async def show_slot_machine(interaction: discord.Interaction):
+    # 初始顯示
+    await interaction.response.send_message("🎰 拉霸機開始轉動... 🎰")
+
+    # 模擬轉動效果
+    for _ in range(10):  # 轉動 5 次
+        result = await spin_slot_machine()
+        await interaction.edit_original_response(content=f"🎰 {' '.join(result)} 🎰")
+        await asyncio.sleep(0.2)  # 每次轉動間隔 1 秒
+
+    # 最終結果
+    final_result = await spin_slot_machine()
+    await interaction.edit_original_response(content=f"🎰 最終結果：{' '.join(final_result)} 🎰")
+    return final_result
+
+def calculate_reward(result):
+    # 計算獎勵金額
+    reward = 0
+    for symbol in result:
+        for s in SLOT_SYMBOLS:
+            if s["symbol"] == symbol:
+                reward += s["reward"]
+                break
+    return reward
+
+@bot.tree.command(name="拉霸", description="花5金幣玩拉霸遊戲或免費拉爽的")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="花錢玩", value="pay"),
+    app_commands.Choice(name="免費玩", value="free")
+])
+async def play_slot_machine(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    # 檢查是否為管理員或在允許的頻道中
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("只有管理員可以使用此指令。", ephemeral=True)
+        return
+
+    # 確認用戶是否已註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你尚未註冊，請先註冊後再玩拉霸。", ephemeral=True)
+        return
+
+    # 檢查用戶是否有足夠的金幣（如果是花錢玩）
+    if mode.value == "pay" and player['coins'] < FIXED_BET_AMOUNT:
+        await interaction.response.send_message(f"你的金幣不足，至少需要 {FIXED_BET_AMOUNT} 金幣才能玩拉霸。", ephemeral=True)
+        return
+
+    # 扣除用戶下注金額（如果是花錢玩）
+    if mode.value == "pay":
+        player['coins'] -= FIXED_BET_AMOUNT
+        server_info['slot_total_bet'] += FIXED_BET_AMOUNT  # 記錄總投注金額
+
+    # 顯示拉霸效果
+    final_result = await show_slot_machine(interaction)
+
+    # 計算獎勵金額（如果是花錢玩）
+    reward = calculate_reward(final_result)
+    if mode.value == "pay":
+        server_info['slot_total_payout'] += reward  # 記錄總打出的金額
+
+    # 發放獎勵（如果是花錢玩）
+    if mode.value == "pay":
+        player['coins'] += reward
+
+    # 保存玩家數據和伺服器信息（如果是花錢玩）
+    if mode.value == "pay":
+        save_players()
+        save_server_info(server_info)
+
+    display_name = interaction.user.display_name
+
+    # 發送最終結果
+    if mode.value == "pay":
+        await interaction.followup.send(f"{display_name} 獲得了 {reward} 金幣！現在你有 {player['coins']} 金幣。")
+    else:
+        missed_coins = reward - FIXED_BET_AMOUNT
+        await interaction.followup.send(f"{display_name} 免費玩了拉霸！結果是：{' '.join(final_result)} 錯過金幣(已計算可能成本) {missed_coins}")
+
+@bot.tree.command(name="拉霸機率表", description="顯示拉霸遊戲的機率表及期望值")
+async def show_slot_probabilities(interaction: discord.Interaction):
+    # 計算單個符號的期望值
+    expected_value_single = sum(
+        symbol['reward'] * symbol['probability'] for symbol in SLOT_SYMBOLS
+    )
+    expected_value_single = round(expected_value_single, 4)  # 四捨五入到小數點後四位
+
+    # 計算每次遊戲的期望值（3 個符號）
+    expected_value_game = expected_value_single * 3
+    expected_value_game = round(expected_value_game, 4)  # 四捨五入到小數點後四位
+
+    # 計算淨期望值（每次遊戲投注 5 金幣）
+    net_expected_value = expected_value_game - 5
+    net_expected_value = round(net_expected_value, 4)  # 四捨五入到小數點後四位
+
+    # 構建機率表訊息
+    probability_table = "**拉霸遊戲機率表：**\n"
+    for symbol in SLOT_SYMBOLS:
+        probability_table += (
+            f"**{symbol['symbol']}** - 獎勵: {symbol['reward']} 金幣, "
+            f"機率: {symbol['probability'] * 100:.2f}%\n"
+        )
+
+    # 加入期望值訊息
+    probability_table += (
+        "\n**期望值分析：**\n"
+        f"- 單個符號期望值: {expected_value_single} 金幣\n"
+        f"- 每次遊戲期望值 (3 個符號): {expected_value_game} 金幣\n"
+        f"- 淨期望值 (每次遊戲投注 5 金幣): {net_expected_value} 金幣\n"
+    )
+
+    # 發送機率表
+    await interaction.response.send_message(probability_table, ephemeral=False)
+
 @bot.tree.command(name="贈送金幣", description="將金幣贈送給其他玩家")
 async def give_coins(interaction: discord.Interaction, recipient: discord.Member, amount: int):
     # 檢查是否為管理員或在允許的頻道中
@@ -1704,8 +1874,10 @@ async def server_status(interaction: discord.Interaction):
     # 創建嵌入消息
     embed = Embed(title="伺服器狀態", color=0x00ff00)
     embed.add_field(name="總金幣", value=f"{total_coins}", inline=False)
-    embed.add_field(name="總進行場數", value=f"{total_matches_played}", inline=False)
+    embed.add_field(name="總進行場數", value=f"{server_info['total_matches_played']}", inline=False)
     embed.add_field(name="總玩家數", value=f"{len(players)}", inline=False)
+    embed.add_field(name="拉霸總投注金額", value=f"{server_info['slot_total_bet']}", inline=False)
+    embed.add_field(name="拉霸總打出的金額", value=f"{server_info['slot_total_payout']}", inline=False)
 
     # 發送嵌入消息
     await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -1925,7 +2097,7 @@ def update_player_coins(player_id, new_coins):
             break
             
 @bot.tree.command(name="購買臨時頻道", description="購買一個限時頻道")
-@app_commands.describe(channel_name="你想創建的頻道名稱", duration="頻道存在的時間（以日為單位 週/1金幣）")
+@app_commands.describe(channel_name="你想創建的頻道名稱", duration="頻道存在的時間（以週為單位 週/1金幣）")
 async def buy_temporary_channel(interaction: discord.Interaction, channel_name: str, duration: int):
     # 檢查玩家是否已註冊
     player = next((p for p in players if p['id'] == interaction.user.id), None)
@@ -2149,12 +2321,72 @@ def get_weather_description(weather: str) -> str:
     """根據天氣返回效果描述"""
     descriptions = {
         "晴天": "分數增減幅度正常。",
-        "暴風雨": "分數增減幅度增加 50%。",
+        "暴風雨": "分數增減幅度增加 20%。",
         "微風": "分數增減幅度減少 20%。",
-        "雷電": "分數增減幅度大幅增加 100%。",
+        "雷電": "分數增減幅度大幅增加 40%。",
         "霧霾": "分數增減幅度隨機波動（0.5x 到 1.5x）。"
     }
     return descriptions.get(weather, "未知天氣效果。")
+    
+    
+@bot.tree.command(name="名聲", description="每天可以幫別人增加或減少 1 點名聲")
+@app_commands.describe(target_user="要更改名聲的玩家", action="增加或減少名聲")
+@app_commands.choices(action=[
+    app_commands.Choice(name="增加", value="increase"),
+    app_commands.Choice(name="減少", value="decrease")
+])
+async def change_reputation(interaction: discord.Interaction, target_user: discord.User, action: app_commands.Choice[str]):
+    # 檢查是否為管理員或在允許的頻道中
+    if interaction.channel.id != ALLOWED_CHANNEL_ID and interaction.user.id not in ADMIN_USER_IDS:
+        await interaction.response.send_message("此指令只能在指定的頻道中使用。", ephemeral=True)
+        return
+
+    # 檢查目標玩家是否已註冊
+    target_player = next((p for p in players if p['id'] == target_user.id), None)
+    if not target_player:
+        await interaction.response.send_message(f"{target_user.name} 尚未註冊。", ephemeral=True)
+        return
+
+    # 檢查玩家是否嘗試更改自己的名聲
+    if interaction.user.id == target_user.id:
+        await interaction.response.send_message("你不能更改自己的名聲。", ephemeral=True)
+        return
+
+    # 檢查玩家是否已經註冊
+    player = next((p for p in players if p['id'] == interaction.user.id), None)
+    if not player:
+        await interaction.response.send_message("你尚未註冊，請先註冊後再使用此指令。", ephemeral=True)
+        return
+
+    # 初始化名聲字段（如果不存在）
+    if 'reputation' not in target_player:
+        target_player['reputation'] = 0
+    if 'last_reputation_change' not in player:
+        player['last_reputation_change'] = 0
+
+    # 檢查玩家是否已經在今天更改過名聲
+    last_change_date = datetime.fromtimestamp(player.get('last_reputation_change', 0)).date()
+    today = datetime.now().date()
+
+    if last_change_date == today:
+        await interaction.response.send_message("你今天已經更改過名聲了，請明天再試。", ephemeral=True)
+        return
+
+    # 更新名聲
+    if action.value == "increase":
+        target_player['reputation'] += 1
+        message = f"你已成功增加 {target_user.name} 的名聲！"
+    else:
+        target_player['reputation'] -= 1
+        message = f"你已成功減少 {target_user.name} 的名聲！"
+
+    # 更新玩家上次更改名聲的時間
+    player['last_reputation_change'] = datetime.now().timestamp()
+
+    # 保存玩家數據
+    save_players()
+
+    await interaction.response.send_message(message, ephemeral=True)
     
 @bot.tree.command(name="help", description="顯示所有可用指令及其描述")
 async def help_command(interaction: discord.Interaction):
@@ -2175,7 +2407,6 @@ async def help_command(interaction: discord.Interaction):
         "/創建比賽 - 創建一場新的比賽\n"
         "/查詢分數 - 查詢玩家的分數和穩定性\n"
         "/查詢合作勝率 - 查詢玩家與特定隊友的合作勝率\n"
-        "/排行榜 - 查看所有玩家的排行榜\n"
         "/贈送金幣 - 將金幣贈送給其他玩家\n"
         "/簽到 - 每日簽到獲取金幣\n"
         "/投注 - 投注比賽\n"
@@ -2187,11 +2418,14 @@ async def help_command(interaction: discord.Interaction):
         "/使用道具 <道具名稱> <比賽ID> - 在比賽中使用道具\n"
         "/查詢道具 - 查詢你擁有的道具\n"
         "/查詢天氣 - 查詢目前伺服器天氣\n"
+        "/拉霸機率表 - 顯示拉霸遊戲的機率表\n"
+        "/名聲 <目標玩家> <動作> - 每天可以幫別人增加或減少 1 點名聲\n"
+        "/排行榜 - 查看所有玩家的排行榜\n"
     )
     await interaction.response.send_message(help_text)
 
 # 在這裡替換成你的機器人Token
-TOKEN = ''
+TOKEN = 'YOUR TOKEN'
 
 # 啟動機器人
 bot.run(TOKEN)
